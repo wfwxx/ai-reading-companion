@@ -44,16 +44,16 @@ export default function Home() {
   const priorHashRef = useRef("");
   const stableCountRef = useRef(0);
 
-  const [cameraOn, setCameraOn] = useState(false);
+  const [source, setSource] = useState<"camera" | "screen" | null>(null);
   const [autoRead, setAutoRead] = useState(true);
   const [listening, setListening] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState("准备开始陪读");
+  const [status, setStatus] = useState("请选择一种识别方式");
   const [question, setQuestion] = useState("");
   const [transcript, setTranscript] = useState("");
   const [context, setContext] = useState("");
-  const [lastFrame, setLastFrame] = useState<string>("");
+  const [lastFrame, setLastFrame] = useState("");
   const [result, setResult] = useState<Result>({});
 
   useEffect(() => {
@@ -82,7 +82,7 @@ export default function Home() {
     if (busyRef.current) return;
     busyRef.current = true;
     setBusy(true);
-    setStatus("正在识别书页和插图...");
+    setStatus("正在识别书页和插图……");
 
     try {
       const response = await fetch("/api/analyze", {
@@ -155,11 +155,9 @@ export default function Home() {
       }
     }
 
-    if (!prior || distance < 3) {
-      stableCountRef.current += 1;
-    } else {
-      stableCountRef.current = 1;
-    }
+    stableCountRef.current = !prior || distance < 3
+      ? stableCountRef.current + 1
+      : 1;
     priorHashRef.current = hash;
 
     if (stableCountRef.current >= 6 && autoRef.current) {
@@ -172,43 +170,82 @@ export default function Home() {
   }, [analyzeFrame]);
 
   useEffect(() => {
-    if (!cameraOn) return;
+    if (!source) return;
     timerRef.current = window.setInterval(() => captureFrame(), 400);
     return () => {
       if (timerRef.current) window.clearInterval(timerRef.current);
     };
-  }, [cameraOn, captureFrame]);
+  }, [source, captureFrame]);
+
+  const attachStream = async (stream: MediaStream, selectedSource: "camera" | "screen") => {
+    streamRef.current = stream;
+    stream.getTracks().forEach((track) => {
+      track.onended = () => {
+        if (streamRef.current === stream) {
+          streamRef.current = null;
+          setSource(null);
+          setStatus(selectedSource === "camera" ? "摄像头已关闭" : "屏幕共享已停止");
+        }
+      };
+    });
+    if (videoRef.current) {
+      videoRef.current.srcObject = stream;
+      await videoRef.current.play();
+    }
+    priorHashRef.current = "";
+    stableCountRef.current = 0;
+    setSource(selectedSource);
+  };
 
   const startCamera = async () => {
     try {
       stopSpeech();
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setStatus("当前浏览器不支持摄像头访问");
+        return;
+      }
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
         audio: false,
       });
-      streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-      }
-      setCameraOn(true);
-      setStatus("请把书页放稳，系统会自动识别");
-    } catch (error) {
+      await attachStream(stream, "camera");
+      setStatus("摄像头已开启，请把书页放稳");
+    } catch {
       setStatus("无法打开摄像头，请检查浏览器权限");
     }
   };
 
-  const stopCamera = () => {
+  const startScreenShare = async () => {
+    try {
+      stopSpeech();
+      const getDisplayMedia = navigator.mediaDevices?.getDisplayMedia;
+      if (!getDisplayMedia) {
+        setStatus("当前浏览器不支持共享屏幕");
+        return;
+      }
+      const stream = await getDisplayMedia.call(navigator.mediaDevices, {
+        video: { frameRate: { ideal: 15, max: 30 } },
+        audio: false,
+      });
+      await attachStream(stream, "screen");
+      setStatus("屏幕共享已开启，请打开书页或电子书");
+    } catch {
+      setStatus("已取消共享，或浏览器不允许共享屏幕");
+    }
+  };
+
+  const stopSource = () => {
+    stopSpeech();
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
-    setCameraOn(false);
-    setStatus("摄像头已关闭");
+    setSource(null);
+    setStatus("识别已停止");
   };
 
   const recognizeNow = () => {
     const frame = captureFrame();
     if (!frame) {
-      setStatus("摄像头尚未准备好");
+      setStatus("画面尚未准备好，请稍候");
       return;
     }
     setLastFrame(frame);
@@ -218,7 +255,7 @@ export default function Home() {
   const startListening = () => {
     const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!Recognition) {
-      setStatus("当前浏览器不支持语音识别，可使用下方文字提问");
+      setStatus("当前浏览器不支持语音识别，请使用文字提问");
       return;
     }
 
@@ -229,9 +266,7 @@ export default function Home() {
     recognition.lang = "zh-CN";
     recognition.onresult = (event: any) => {
       let text = "";
-      for (let i = 0; i < event.results.length; i++) {
-        text += event.results[i][0].transcript;
-      }
+      for (let i = 0; i < event.results.length; i++) text += event.results[i][0].transcript;
       setTranscript(text);
       setQuestion(text);
     };
@@ -243,7 +278,7 @@ export default function Home() {
     recognitionRef.current = recognition;
     recognition.start();
     setListening(true);
-    setStatus("正在听，请说出你的问题...");
+    setStatus("正在听，请说出你的问题……");
   };
 
   const stopListening = () => {
@@ -254,7 +289,7 @@ export default function Home() {
   const submitQuestion = () => {
     const frame = captureFrame();
     if (!frame) {
-      setStatus("请先打开摄像头");
+      setStatus("请先开启摄像头或共享屏幕");
       return;
     }
     setLastFrame(frame);
@@ -268,13 +303,16 @@ export default function Home() {
           <h1>AI 实时陪读</h1>
           <p>{status}</p>
         </div>
-        <div className="actions">
-          {cameraOn ? (
-            <button className="button secondary" onClick={stopCamera}>关闭摄像头</button>
+        <nav className="sourceActions" aria-label="识别方式">
+          {source ? (
+            <button className="button secondary" onClick={stopSource}>停止识别</button>
           ) : (
-            <button className="button" onClick={startCamera}>开启陪读</button>
+            <>
+              <button className="button" onClick={startCamera}>使用摄像头</button>
+              <button className="button screen" onClick={startScreenShare}>共享屏幕</button>
+            </>
           )}
-        </div>
+        </nav>
       </header>
 
       <section className="layout">
@@ -282,30 +320,53 @@ export default function Home() {
           <video ref={videoRef} muted playsInline />
           <canvas ref={canvasRef} hidden />
 
-          {lastFrame && <img className="thumbnail" src={lastFrame} alt="最近识别的书页" />}
+          {!source && (
+            <div className="sourceChooser">
+              <h2>选择识别方式</h2>
+              <p>可以直接拍摄实体书，也可以识别电脑中的电子书或网页。</p>
+              <div className="sourceCards">
+                <button onClick={startCamera}>
+                  <span className="sourceIcon">📷</span>
+                  <strong>摄像头识别</strong>
+                  <small>适合纸质书、绘本和题目</small>
+                </button>
+                <button onClick={startScreenShare}>
+                  <span className="sourceIcon">🖥️</span>
+                  <strong>共享屏幕识别</strong>
+                  <small>适合电子书、网页和学习页面</small>
+                </button>
+              </div>
+            </div>
+          )}
 
-          <div className="videoControls">
-            <button className="round" onClick={listening ? stopListening : startListening} aria-label="语音提问">
-              {listening ? "■" : "🎙"}
-            </button>
-            <button className="round" onClick={speaking ? stopSpeech : recognizeNow} aria-label="朗读或识别">
-              {speaking ? "Ⅱ" : "▸"}
-            </button>
-          </div>
+          {lastFrame && <img className="thumbnail" src={lastFrame} alt="最近识别的页面" />}
 
-          <label className="autoToggle">
-            <input type="checkbox" checked={autoRead} onChange={(event) => setAutoRead(event.target.checked)} />
-            页面稳定后自动识别
-          </label>
+          {source && (
+            <div className="videoControls">
+              <button className="round" onClick={listening ? stopListening : startListening} aria-label="语音提问">
+                {listening ? "■" : "🎙"}
+              </button>
+              <button className="round" onClick={speaking ? stopSpeech : recognizeNow} aria-label="朗读或识别">
+                {speaking ? "Ⅱ" : "识别"}
+              </button>
+            </div>
+          )}
+
+          {source && (
+            <label className="autoToggle">
+              <input type="checkbox" checked={autoRead} onChange={(event) => setAutoRead(event.target.checked)} />
+              页面稳定后自动识别
+            </label>
+          )}
         </div>
 
         <aside className="panel">
           <div className="tabs">
             <span className="active">陪读结果</span>
-            <span>上下文已保留 {context.length} 字</span>
+            <span>上下文：{context.length} 字</span>
           </div>
 
-          {busy && <div className="busy">正在理解这一页...</div>}
+          {busy && <div className="busy">正在理解这一页……</div>}
 
           {result.response ? (
             <article className="answer">
@@ -313,7 +374,7 @@ export default function Home() {
               {result.pageSummary && <p className="summary">{result.pageSummary}</p>}
               <p>{result.response}</p>
               {result.illustration && <div className="note"><strong>画面观察：</strong>{result.illustration}</div>}
-              {result.needsClarification && <div className="warning">部分文字或条件可能识别不完整，请补拍清晰页面。</div>}
+              {result.needsClarification && <div className="warning">部分文字或条件可能识别不完整，请补拍清晰页面或重新共享。</div>}
             </article>
           ) : result.error ? (
             <article className="empty errorBox">
@@ -324,8 +385,8 @@ export default function Home() {
           ) : (
             <article className="empty">
               <div className="bookIcon">📖</div>
-              <h2>把书放到镜头前</h2>
-              <p>页面稳定后会自动识别。你也可以随时按麦克风提问。</p>
+              <h2>把实体书放到镜头前</h2>
+              <p>或共享屏幕中的电子书、网页或学习页面；页面稳定后会自动识别。</p>
             </article>
           )}
 
@@ -343,9 +404,9 @@ export default function Home() {
               onKeyDown={(event) => {
                 if (event.key === "Enter") submitQuestion();
               }}
-              placeholder={transcript ? `听到：${transcript}` : "问这一页、换一个讲法或帮我解题..."}
+              placeholder={transcript ? `听到：${transcript}` : "问这一页、换一种讲法或帮我解题……"}
             />
-            <button className="send" onClick={submitQuestion} disabled={busy}>发送</button>
+            <button className="send" onClick={submitQuestion} disabled={busy || !source}>发送</button>
           </div>
         </aside>
       </section>
